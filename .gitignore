@@ -1,0 +1,19 @@
+# Python bytecode / cache
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+
+# Streamlit Packlist app: user uploads and generated PDF runs (regenerate locally / on Cloud)
+Packlist_App/uploads/
+Packlist_App/outputs/
+
+# Generated PDFs (e.g. local smoke tests, old packlist.pdf in repo root)
+*.pdf
+
+# Local / test CSV files (sample data; not part of the deployed app)
+testpacklist.csv
+**/test*.csv
+*_test*.csv
