@@ -26,6 +26,16 @@ def slugify(value: str) -> str:
     return value.strip("-") or "event"
 
 
+def is_valid_event_id(raw: str) -> bool:
+    """Event ID: digits only, or the internal label 'Internal PL' / 'Internal PL!' (case-insensitive)."""
+    value = raw.strip()
+    if not value:
+        return False
+    if re.fullmatch(r"\d+", value):
+        return True
+    return bool(re.fullmatch(r"(?i)internal pl!?", value))
+
+
 def get_recent_pdfs(limit: int = 10) -> list[Path]:
     pdf_paths = [path for path in OUTPUT_ROOT.rglob("*.pdf") if path.is_file()]
     pdf_paths.sort(key=lambda path: path.stat().st_mtime, reverse=True)
@@ -169,7 +179,12 @@ with st.expander("Reuse previous event", expanded=False):
             st.success("Template loaded.")
 
 csv_file = st.file_uploader("CSV File", type=["csv"])
-event_id = st.text_input("Event ID", placeholder="12345", key="event_id")
+event_id = st.text_input(
+    "Event ID (numbers only, or Internal PL)",
+    placeholder='e.g. 12345 or Internal PL',
+    key="event_id",
+    help="Use digits only (any length), or type Internal PL (optional !) for internal events.",
+)
 event_client = st.text_input(
     "Event Client (optional - auto from CSV if blank)",
     placeholder="Acme Wedding",
@@ -197,6 +212,11 @@ if st.session_state.get("loaded_source_csv_path"):
 if st.button("Generate PDF"):
     if not event_id.strip():
         st.error("Event ID is required.")
+    elif not is_valid_event_id(event_id):
+        st.error(
+            "Event ID must be numbers only (e.g. 12345), or exactly Internal PL or Internal PL! "
+            "(spacing as shown; case does not matter)."
+        )
     elif not version.strip():
         st.error("Version is required.")
     elif location_option == "Custom" and not custom_location.strip():
