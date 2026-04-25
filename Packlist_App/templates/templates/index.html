@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Packlist PDF Generator</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 2rem; max-width: 700px; }
+    h1 { margin-bottom: 1rem; }
+    form { display: grid; gap: 0.75rem; }
+    input, button { padding: 0.6rem; font-size: 1rem; }
+    .messages { margin-bottom: 1rem; color: #b00020; }
+    .success { margin-top: 1rem; padding: 0.75rem; background: #eef9ee; border: 1px solid #c6e8c6; }
+  </style>
+</head>
+<body>
+  <h1>Packlist PDF Generator</h1>
+
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}
+      <div class="messages">
+        {% for msg in messages %}
+          <div>{{ msg }}</div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+
+  <form action="{{ url_for('generate') }}" method="POST" enctype="multipart/form-data">
+    <label>CSV File</label>
+    <input type="file" name="csv_file" accept=".csv" required>
+
+    <label>Event Name (optional)</label>
+    <input type="text" name="event_name" placeholder="Spring Gala 2026">
+
+    <label>Title</label>
+    <input type="text" name="title" placeholder="PACKLIST" required>
+
+    <label>Version</label>
+    <input type="text" name="version" placeholder="V1.0" required>
+
+    <button type="submit">Generate PDF</button>
+  </form>
+
+  {% if download_ready %}
+    <div class="success">
+      PDF generated: <strong>{{ generated_file }}</strong><br>
+      <a href="{{ download_url }}">Download PDF</a>
+    </div>
+  {% endif %}
+</body>
+</html>
