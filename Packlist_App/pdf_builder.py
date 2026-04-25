@@ -20,6 +20,22 @@ def clean_text(text):
     return text
 
 
+def soft_wrap_long_tokens(text: str, chunk_size: int = 28) -> str:
+    """Break very long tokens so FPDF can wrap; avoids 'not enough horizontal space' on deploy."""
+    parts = []
+    for token in str(text).split():
+        if len(token) <= chunk_size:
+            parts.append(token)
+        else:
+            parts.append(" ".join(token[i : i + chunk_size] for i in range(0, len(token), chunk_size)))
+    return " ".join(parts)
+
+
+def _text_width(pdf: FPDF) -> float:
+    """Usable width for text (fpdf2 has epw; older builds use margins)."""
+    return float(getattr(pdf, "epw", pdf.w - pdf.l_margin - pdf.r_margin))
+
+
 class PacklistPDF(FPDF):
     def __init__(
         self,
@@ -47,7 +63,10 @@ class PacklistPDF(FPDF):
     def header(self):
         self.set_text_color(0, 82, 204)
         self.set_font("Arial", "B", 18)
-        self.cell(0, 8, self.title, new_x="LMARGIN", new_y="NEXT", align="C")
+        # Explicit width avoids w=0 edge cases across fpdf2 versions / platforms.
+        title_w = _text_width(self)
+        self.set_x(self.l_margin)
+        self.multi_cell(title_w, 8, soft_wrap_long_tokens(self.title, 24), align="C", new_x="LMARGIN", new_y="NEXT")
 
         self.set_text_color(0, 0, 0)
         self.set_font("Arial", "", 8)
@@ -56,18 +75,21 @@ class PacklistPDF(FPDF):
             f"ID: {self.event_id} | Client: {self.event_client} | Date: {self.event_date} | "
             f"Location: {self.location} | Setup By: {self.setup_by} | Version: {self.version}"
         )
-        # multi_cell wraps safely when event metadata is long.
-        self.multi_cell(0, 4, details, align="C")
+        details = soft_wrap_long_tokens(details, 26)
+        w = _text_width(self)
+        self.set_x(self.l_margin)
+        self.multi_cell(w, 4, details, align="C")
 
         if self.setup_note:
             self.set_font("Arial", "I", 7)
-            self.multi_cell(0, 4, f"Setup Note: {self.setup_note}", align="C")
+            self.set_x(self.l_margin)
+            self.multi_cell(w, 4, soft_wrap_long_tokens(f"Setup Note: {self.setup_note}", 26), align="C")
         self.ln(1)
 
     def footer(self):
-        self.set_y(-15)
+        self.set_xy(self.l_margin, -15)
         self.set_font("Arial", "I", 10)
-        self.cell(0, 10, f"Page {self.page_no()} of {{nb}}", align="C")
+        self.cell(_text_width(self), 10, f"Page {self.page_no()} of {{nb}}", align="C")
 
     def add_element_box(self, element_name, items, x_offset, y_offset):
         box_width = 90
@@ -104,16 +126,18 @@ class PacklistPDF(FPDF):
                 self.set_text_color(0, 0, 0)
 
             self.set_text_color(0, 0, 0)
-            self.cell(10, line_height, qty_text, border=0)
+            # Keep qty column narrow; long strings can break cell() width math on some hosts.
+            qty_display = str(qty_text)[:8] if len(str(qty_text)) > 8 else str(qty_text)
+            self.cell(10, line_height, qty_display, border=0)
 
-            name_text = str(item.get("Name", "")).lstrip("-").strip()
+            name_text = soft_wrap_long_tokens(str(item.get("Name", "")).lstrip("-").strip(), 22)
             self.multi_cell(box_width - 10, line_height, name_text, border=0)
 
             note = str(item.get("Item Note", "")).strip()
             if note:
                 self.set_x(x_offset + 10)
                 self.set_font("Arial", "I", 7)
-                self.multi_cell(box_width - 10, line_height, note, border=0)
+                self.multi_cell(box_width - 10, line_height, soft_wrap_long_tokens(note, 22), border=0)
                 self.set_font("Arial", "", 8)
 
 
@@ -171,6 +195,12 @@ def build_packlist_pdf(
     for element, items in grouped_elements:
         items_list = items.to_dict("records")
         col = 0 if current_y[0] <= current_y[1] else 1
+        # Avoid drawing past page bottom (can confuse cursor / width on next draw).
+        if current_y[col] > 250:
+            pdf.add_page()
+            y_offset = max(pdf.get_y() + 2, 24)
+            current_y = [y_offset, y_offset]
+            col = 0
         pdf.add_element_box(element, items_list, x_offsets[col], current_y[col])
         current_y[col] = pdf.get_y() + 2
 
