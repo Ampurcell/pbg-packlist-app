@@ -1,0 +1,7 @@
+{
+  "plugins": {
+    "zapier": {
+      "enabled": true
+    }
+  }
+}
