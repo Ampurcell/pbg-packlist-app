@@ -11,7 +11,7 @@ from pdf_builder import build_packlist_pdf
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_ROOT = BASE_DIR / "uploads"
 OUTPUT_ROOT = BASE_DIR / "outputs"
-LOGO_PATH = BASE_DIR / "PBG Event Group Logo.png"
+LOGO_PATH = BASE_DIR / "assets" / "PBG Event Group Logo.png"
 DATE_FMT = "%m/%d/%Y"
 SETUP_TIME_DEFAULT = datetime.strptime("05:00 PM", "%I:%M %p").time()
 LOCATION_OPTIONS = ["Chameleon", "EMBEJC", "Merrick Jewish Center", "Custom"]
