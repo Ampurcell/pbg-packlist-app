@@ -1,9 +1,12 @@
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 from uuid import uuid4
 
 import pandas as pd
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
@@ -41,12 +44,11 @@ async def generate_packlist(
     setup_by: str = Form(...),
     version: str = Form(...),
     setup_note: str = Form(""),
-    csv_file: UploadFile = File(...),
+    csv_file_url: str = Form(...),
 ):
-    if not csv_file.filename:
-        raise HTTPException(status_code=400, detail="CSV file is required.")
-    if not csv_file.filename.lower().endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Uploaded file must be a CSV.")
+    parsed = urlparse(csv_file_url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="csv_file_url must be a valid http/https URL.")
 
     csv_temp_path: Path | None = None
     pdf_temp_path: Path | None = None
@@ -54,9 +56,33 @@ async def generate_packlist(
     try:
         with NamedTemporaryFile(delete=False, suffix=".csv") as csv_temp:
             csv_temp_path = Path(csv_temp.name)
-            content = await csv_file.read()
+            request = Request(csv_file_url.strip(), headers={"User-Agent": "PacklistAPI/1.0"})
+            try:
+                with urlopen(request, timeout=20) as response:
+                    if response.status >= 400:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Could not download CSV from csv_file_url (HTTP {response.status}).",
+                        )
+                    content = response.read()
+            except HTTPError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Could not download CSV from csv_file_url (HTTP {exc.code}).",
+                ) from exc
+            except URLError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Could not download CSV from csv_file_url: {exc.reason}",
+                ) from exc
+            except TimeoutError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Could not download CSV from csv_file_url: request timed out.",
+                ) from exc
+
             if not content:
-                raise HTTPException(status_code=400, detail="CSV file is empty.")
+                raise HTTPException(status_code=400, detail="Downloaded CSV is empty.")
             csv_temp.write(content)
 
         pdf_temp_path = Path.cwd() / "tmp" / f"packlist_{uuid4().hex}.pdf"
@@ -97,5 +123,3 @@ async def generate_packlist(
         if csv_temp_path or pdf_temp_path:
             _cleanup_files(*(p for p in (csv_temp_path, pdf_temp_path) if p is not None))
         raise HTTPException(status_code=500, detail=f"Unexpected server error: {exc}") from exc
-    finally:
-        await csv_file.close()
