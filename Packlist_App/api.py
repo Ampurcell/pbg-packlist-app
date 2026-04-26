@@ -6,8 +6,9 @@ from urllib.request import Request, urlopen
 from uuid import uuid4
 
 import pandas as pd
-from fastapi import FastAPI, Form, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 from pdf_builder import build_packlist_pdf
@@ -17,6 +18,18 @@ app = FastAPI(
     description="Generate packlist PDFs from CSV uploads.",
     version="1.0.0",
 )
+
+
+class GeneratePacklistRequest(BaseModel):
+    event_id: str
+    event_title: str
+    event_client: str
+    event_date: str
+    location: str
+    setup_by: str
+    version: str
+    setup_note: str = ""
+    csv_file_url: str
 
 
 def _cleanup_files(*paths: Path) -> None:
@@ -36,17 +49,9 @@ def _safe_pdf_name(event_id: str, event_title: str) -> str:
 
 @app.post("/generate-packlist")
 async def generate_packlist(
-    event_id: str = Form(...),
-    event_title: str = Form(...),
-    event_client: str = Form(...),
-    event_date: str = Form(...),
-    location: str = Form(...),
-    setup_by: str = Form(...),
-    version: str = Form(...),
-    setup_note: str = Form(""),
-    csv_file_url: str = Form(...),
+    payload: GeneratePacklistRequest,
 ):
-    parsed = urlparse(csv_file_url.strip())
+    parsed = urlparse(payload.csv_file_url.strip())
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise HTTPException(status_code=400, detail="csv_file_url must be a valid http/https URL.")
 
@@ -56,7 +61,7 @@ async def generate_packlist(
     try:
         with NamedTemporaryFile(delete=False, suffix=".csv") as csv_temp:
             csv_temp_path = Path(csv_temp.name)
-            request = Request(csv_file_url.strip(), headers={"User-Agent": "PacklistAPI/1.0"})
+            request = Request(payload.csv_file_url.strip(), headers={"User-Agent": "PacklistAPI/1.0"})
             try:
                 with urlopen(request, timeout=20) as response:
                     if response.status >= 400:
@@ -90,20 +95,20 @@ async def generate_packlist(
         build_packlist_pdf(
             csv_path=csv_temp_path,
             output_pdf_path=pdf_temp_path,
-            title=event_title,
-            version=version,
-            event_id=event_id,
-            event_client=event_client,
-            event_date=event_date,
-            location=location,
-            setup_by=setup_by,
-            setup_note=setup_note,
+            title=payload.event_title,
+            version=payload.version,
+            event_id=payload.event_id,
+            event_client=payload.event_client,
+            event_date=payload.event_date,
+            location=payload.location,
+            setup_by=payload.setup_by,
+            setup_note=payload.setup_note,
         )
 
         if not pdf_temp_path.exists():
             raise HTTPException(status_code=500, detail="PDF generation failed.")
 
-        filename = _safe_pdf_name(event_id=event_id, event_title=event_title)
+        filename = _safe_pdf_name(event_id=payload.event_id, event_title=payload.event_title)
         return FileResponse(
             path=str(pdf_temp_path),
             media_type="application/pdf",
