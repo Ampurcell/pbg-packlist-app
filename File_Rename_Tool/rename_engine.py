@@ -34,11 +34,17 @@ _PAREN_SMALL_NUMBER = re.compile(
     re.IGNORECASE,
 )
 
-# No$$ flag (case-insensitive). Trailing \b fails at end-of-string after $, so use (?!\w).
-_FLAG_NO_MONEY = re.compile(r"(?i)\bno\$\$(?!\w)")
+# No$$ flag (case-insensitive). Match 2+ $ so sync noise like "NO$$$" is fully removed; display stays "No$$".
+# (?!\w) avoids matching "no$$" inside a longer token.
+_FLAG_NO_MONEY = re.compile(r"(?i)\bno\$\$+(?!\w)")
 
 # NO # flag (case-insensitive). \b after # fails at end-of-string; use (?!\w) like No$$.
 _FLAG_NO_POUND = re.compile(r"(?i)\bno\s*#(?!\w)")
+
+# Apple / Finder noise: "-Alisha's MacBook Pro" after a date (require Name's before MacBook Pro).
+_MACBOOK_SUFFIX = re.compile(
+    r"(?i)[\-–—]\s*[A-Za-z0-9]+['\u2019]s\s+MacBook\s+Pro\s*$"
+)
 
 # Trailing version letter: one A–Z immediately before extension, preceded by sep or dot chain after date.
 _TRAILING_VERSION = re.compile(r"([\s._-])([A-Z])$")
@@ -102,6 +108,7 @@ def remove_junk_from_basename(basename_no_ext: str) -> str:
     - Bracket segments containing 'conflict'
     - Parenthetical conflict/copy phrases or small isolated (1)/(2) markers
     - Bare phrases like 'conflict copy' / 'recovery copy'
+    - Finder-style device suffix: "-Someone's MacBook Pro" (not general "MacBook Pro" titles)
     """
     s = basename_no_ext
     s = _BRACKET_CONFLICT.sub(" ", s)
@@ -114,6 +121,7 @@ def remove_junk_from_basename(basename_no_ext: str) -> str:
         s = nxt
     s = re.sub(r"\bconflict\s+copy\b", " ", s, flags=re.IGNORECASE)
     s = re.sub(r"\brecovery\s+copy\b", " ", s, flags=re.IGNORECASE)
+    s = _MACBOOK_SUFFIX.sub(" ", s)
     return s
 
 

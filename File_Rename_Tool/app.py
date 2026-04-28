@@ -263,114 +263,155 @@ def main() -> None:
     # ---- Apply from Google Sheet ----
     if apply_btn:
         log_path = _log_csv_path(start_i, size_i)
-        with st.spinner("Reading worksheet and applying approved renames…"):
+        with st.status("Applying approved renames…", expanded=True) as apply_status:
+            apply_status.write("Loading worksheet from Google Sheets…")
             data_rows, err = read_worksheet_rows(sheet_name.strip(), apply_ws.strip())
-        if err:
-            st.error(err)
-        elif not data_rows:
-            st.warning("Worksheet is empty or only has a header row.")
-        else:
-            progress = st.progress(0.0)
-            n = len(data_rows)
-            results: List[str] = []
+            if err:
+                apply_status.update(label="Could not read worksheet", state="error", expanded=True)
+                st.error(err)
+            elif not data_rows:
+                apply_status.update(label="No data rows in worksheet", state="error", expanded=True)
+                st.warning("Worksheet is empty or only has a header row.")
+            else:
+                n = len(data_rows)
+                apply_status.write(
+                    f"Processing **{n}** row(s). Backup log: `{os.path.basename(log_path)}`"
+                )
+                progress = st.progress(0.0, text=f"Starting… 0 / {n}")
+                results: List[str] = []
+                counts = {"renamed": 0, "skipped": 0, "conflict": 0, "error": 0}
 
-            for idx, (sheet_row, rd) in enumerate(data_rows):
-                progress.progress(min(1.0, (idx + 1) / max(1, n)))
-                row_ts = datetime.now().isoformat(timespec="seconds")
-
-                approve_val = rd.get("Approve", "")
-                orig_path = rd.get("Full File Path", "").strip()
-                proposed = rd.get("Proposed Filename", "").strip()
-
-                if not _normalize_yes(approve_val):
-                    _append_csv_log(log_path, orig_path, "", "Skipped", "")
-                    ok_upd, err_upd = update_row_status_timestamp(
-                        sheet_name.strip(),
-                        apply_ws.strip(),
-                        sheet_row,
-                        "Skipped",
-                        row_ts,
-                        "",
+                for idx, (sheet_row, rd) in enumerate(data_rows):
+                    done = idx + 1
+                    progress.progress(
+                        min(1.0, done / max(1, n)),
+                        text=f"Row {done} / {n} (sheet row {sheet_row})…",
                     )
-                    if not ok_upd:
-                        results.append(f"Row {sheet_row}: sheet update failed: {err_upd}")
-                    continue
+                    row_ts = datetime.now().isoformat(timespec="seconds")
 
-                safe, why = _is_safe_proposed_filename(proposed)
-                if not safe:
-                    _append_csv_log(log_path, orig_path, "", "Error", why)
-                    update_row_status_timestamp(
-                        sheet_name.strip(), apply_ws.strip(), sheet_row, "Error", row_ts, why
-                    )
-                    results.append(f"Row {sheet_row}: {why}")
-                    continue
+                    approve_val = rd.get("Approve", "")
+                    orig_path = rd.get("Full File Path", "").strip()
+                    proposed = rd.get("Proposed Filename", "").strip()
 
-                if not orig_path or not os.path.isfile(orig_path):
-                    em = "Original file no longer exists"
-                    _append_csv_log(log_path, orig_path, "", "Error", em)
-                    update_row_status_timestamp(
-                        sheet_name.strip(), apply_ws.strip(), sheet_row, "Error", row_ts, em
-                    )
-                    continue
-
-                target_dir = os.path.dirname(orig_path)
-                target_path = os.path.join(target_dir, proposed)
-
-                if os.path.basename(orig_path) == proposed:
-                    _append_csv_log(log_path, orig_path, target_path, "Skipped", "Already named")
-                    update_row_status_timestamp(
-                        sheet_name.strip(),
-                        apply_ws.strip(),
-                        sheet_row,
-                        "Skipped",
-                        row_ts,
-                        "Already named",
-                    )
-                    continue
-
-                if os.path.exists(target_path):
-                    try:
-                        same = os.path.samefile(target_path, orig_path)
-                    except OSError:
-                        same = False
-                    if not same:
-                        em = "Target filename already exists"
-                        _append_csv_log(
-                            log_path, orig_path, target_path, "Conflict", em
+                    if not _normalize_yes(approve_val):
+                        counts["skipped"] += 1
+                        _append_csv_log(log_path, orig_path, "", "Skipped", "")
+                        ok_upd, err_upd = update_row_status_timestamp(
+                            sheet_name.strip(),
+                            apply_ws.strip(),
+                            sheet_row,
+                            "Skipped",
+                            row_ts,
+                            "",
                         )
+                        if not ok_upd:
+                            results.append(f"Row {sheet_row}: sheet update failed: {err_upd}")
+                        continue
+
+                    safe, why = _is_safe_proposed_filename(proposed)
+                    if not safe:
+                        counts["error"] += 1
+                        _append_csv_log(log_path, orig_path, "", "Error", why)
+                        update_row_status_timestamp(
+                            sheet_name.strip(), apply_ws.strip(), sheet_row, "Error", row_ts, why
+                        )
+                        results.append(f"Row {sheet_row}: {why}")
+                        continue
+
+                    if not orig_path or not os.path.isfile(orig_path):
+                        counts["error"] += 1
+                        em = "Original file no longer exists"
+                        _append_csv_log(log_path, orig_path, "", "Error", em)
+                        update_row_status_timestamp(
+                            sheet_name.strip(), apply_ws.strip(), sheet_row, "Error", row_ts, em
+                        )
+                        continue
+
+                    target_dir = os.path.dirname(orig_path)
+                    target_path = os.path.join(target_dir, proposed)
+
+                    if os.path.basename(orig_path) == proposed:
+                        counts["skipped"] += 1
+                        _append_csv_log(log_path, orig_path, target_path, "Skipped", "Already named")
                         update_row_status_timestamp(
                             sheet_name.strip(),
                             apply_ws.strip(),
                             sheet_row,
-                            "Conflict",
+                            "Skipped",
                             row_ts,
-                            em,
+                            "Already named",
                         )
                         continue
 
-                try:
-                    os.rename(orig_path, target_path)
-                except OSError as e:
-                    em = str(e)
-                    _append_csv_log(log_path, orig_path, target_path, "Error", em)
+                    if os.path.exists(target_path):
+                        try:
+                            same = os.path.samefile(target_path, orig_path)
+                        except OSError:
+                            same = False
+                        if not same:
+                            counts["conflict"] += 1
+                            em = "Target filename already exists"
+                            _append_csv_log(
+                                log_path, orig_path, target_path, "Conflict", em
+                            )
+                            update_row_status_timestamp(
+                                sheet_name.strip(),
+                                apply_ws.strip(),
+                                sheet_row,
+                                "Conflict",
+                                row_ts,
+                                em,
+                            )
+                            continue
+
+                    try:
+                        os.rename(orig_path, target_path)
+                    except OSError as e:
+                        counts["error"] += 1
+                        em = str(e)
+                        _append_csv_log(log_path, orig_path, target_path, "Error", em)
+                        update_row_status_timestamp(
+                            sheet_name.strip(), apply_ws.strip(), sheet_row, "Error", row_ts, em
+                        )
+                        results.append(f"Row {sheet_row}: {em}")
+                        continue
+
+                    counts["renamed"] += 1
+                    _append_csv_log(log_path, orig_path, target_path, "Renamed", "")
                     update_row_status_timestamp(
-                        sheet_name.strip(), apply_ws.strip(), sheet_row, "Error", row_ts, em
+                        sheet_name.strip(), apply_ws.strip(), sheet_row, "Renamed", row_ts, ""
                     )
-                    results.append(f"Row {sheet_row}: {em}")
-                    continue
 
-                _append_csv_log(log_path, orig_path, target_path, "Renamed", "")
-                update_row_status_timestamp(
-                    sheet_name.strip(), apply_ws.strip(), sheet_row, "Renamed", row_ts, ""
+                progress.progress(1.0, text=f"Finished {n} / {n}")
+                summary_md = (
+                    f"**Renamed:** {counts['renamed']} · **Skipped:** {counts['skipped']} · "
+                    f"**Conflict:** {counts['conflict']} · **Errors:** {counts['error']}"
                 )
+                summary_plain = (
+                    f"Renamed: {counts['renamed']}, Skipped: {counts['skipped']}, "
+                    f"Conflict: {counts['conflict']}, Errors: {counts['error']}"
+                )
+                apply_status.write(summary_md)
+                apply_status.update(
+                    label="Apply finished",
+                    state="complete",
+                    expanded=bool(results),
+                )
+                progress.empty()
 
-            progress.empty()
-            st.success(
-                f"Apply pass finished. Local backup log: `{os.path.basename(log_path)}`"
-            )
-            if results:
-                with st.expander("Errors / notes"):
-                    st.write("\n".join(results))
+                st.success(
+                    f"Apply finished. {summary_plain} — backup log: `{os.path.basename(log_path)}`"
+                )
+                try:
+                    st.toast(
+                        f"Done: {counts['renamed']} renamed, {counts['skipped']} skipped.",
+                        icon="✅",
+                    )
+                except Exception:
+                    pass
+                if results:
+                    with st.expander("Errors / notes"):
+                        st.write("\n".join(results))
 
     # ---- Footer help ----
     with st.expander("Local setup (quick reference)"):
