@@ -37,6 +37,9 @@ _PAREN_SMALL_NUMBER = re.compile(
 # No$$ flag (case-insensitive). Trailing \b fails at end-of-string after $, so use (?!\w).
 _FLAG_NO_MONEY = re.compile(r"(?i)\bno\$\$(?!\w)")
 
+# NO # flag (case-insensitive). \b after # fails at end-of-string; use (?!\w) like No$$.
+_FLAG_NO_POUND = re.compile(r"(?i)\bno\s*#(?!\w)")
+
 # Trailing version letter: one A–Z immediately before extension, preceded by sep or dot chain after date.
 _TRAILING_VERSION = re.compile(r"([\s._-])([A-Z])$")
 
@@ -118,6 +121,13 @@ def extract_no_money_flag(stem: str) -> Tuple[str, bool]:
     """Remove No$$ from stem; return (stem_without_flag, has_flag)."""
     has = _FLAG_NO_MONEY.search(stem) is not None
     cleaned = _FLAG_NO_MONEY.sub(" ", stem)
+    return cleaned, has
+
+
+def extract_no_pound_flag(stem: str) -> Tuple[str, bool]:
+    """Remove NO # from stem; return (stem_without_flag, has_flag). Canonical display: NO #."""
+    has = _FLAG_NO_POUND.search(stem) is not None
+    cleaned = _FLAG_NO_POUND.sub(" ", stem)
     return cleaned, has
 
 
@@ -240,11 +250,12 @@ def _assemble_proposed_name(
     iso_date: Optional[str],
     event_name: str,
     version: Optional[str],
-    has_flag: bool,
+    flag_tokens: List[str],
     ext: str,
 ) -> str:
     """
-    YYYY-MM-DD - Event Name - Version - Flag.ext
+    YYYY-MM-DD - Event Name - Version - Flag(s).ext
+    flag_tokens: e.g. ["No$$"] and/or ["NO #"] in stable order (No$$ then NO #).
     Omit date / version / flag segments when absent; avoid double dashes.
     """
     parts: List[str] = []
@@ -254,8 +265,9 @@ def _assemble_proposed_name(
         parts.append(event_name)
     if version:
         parts.append(version)
-    if has_flag:
-        parts.append("No$$")
+    for tok in flag_tokens:
+        if tok:
+            parts.append(tok)
 
     if not parts:
         return ""
@@ -291,8 +303,9 @@ def build_proposed_filename(original_filename: str) -> dict:
     # 1) Junk removal first (brackets/parens per spec)
     stem = remove_junk_from_basename(base)
 
-    # 2) Flag — extract before version so "... A No$$" resolves correctly
-    stem, has_flag = extract_no_money_flag(stem)
+    # 2) Flags — NO # before No$$, both before version so "… D NO #" yields version D
+    stem, has_no_pound = extract_no_pound_flag(stem)
+    stem, has_no_money = extract_no_money_flag(stem)
 
     # 3) Version letter at end (not inside words — requires leading separator)
     stem, version_letter = extract_trailing_version_letter(stem)
@@ -309,7 +322,12 @@ def build_proposed_filename(original_filename: str) -> dict:
 
     iso = primary.iso if primary else ""
 
-    proposed = _assemble_proposed_name(iso or None, cleaned_event, version_letter, has_flag, ext)
+    flag_tokens: List[str] = []
+    if has_no_money:
+        flag_tokens.append("No$$")
+    if has_no_pound:
+        flag_tokens.append("NO #")
+    proposed = _assemble_proposed_name(iso or None, cleaned_event, version_letter, flag_tokens, ext)
 
     # If everything stripped away, fall back to the original filename
     if not proposed.strip() or proposed == ext:
@@ -317,7 +335,7 @@ def build_proposed_filename(original_filename: str) -> dict:
 
     needs_review = confidence != "HIGH"
 
-    flag_display = "No$$" if has_flag else ""
+    flag_display = "; ".join(flag_tokens)
 
     return {
         "extracted_date": iso,
