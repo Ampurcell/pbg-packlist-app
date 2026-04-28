@@ -133,8 +133,10 @@ def push_batch(
             ]
         )
 
+    # RAW = store literals; USER_ENTERED makes Sheets parse "2012-06-17 - Name" as a date
+    # and strip hyphens / change spacing in the Proposed Filename column.
     try:
-        ws.update(table, value_input_option="USER_ENTERED")
+        ws.update(table, value_input_option="RAW")
     except Exception as e:
         return False, f"Writing sheet failed: {e}"
 
@@ -209,7 +211,7 @@ def update_row_status_timestamp(
                 {"range": status_cell, "values": [[value]]},
                 {"range": time_cell, "values": [[timestamp]]},
             ],
-            value_input_option="USER_ENTERED",
+            value_input_option="RAW",
         )
     except Exception as e:
         return False, str(e)
