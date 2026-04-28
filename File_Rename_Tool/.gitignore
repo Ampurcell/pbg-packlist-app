@@ -2,3 +2,6 @@ credentials.json
 .venv/
 __pycache__/
 *.pyc
+
+# Local backup logs from Apply (path includes batch start/size)
+rename_log_*.csv
