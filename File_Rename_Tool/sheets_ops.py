@@ -8,39 +8,98 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-# Column order must match read/apply logic (status columns at end).
+# Column order: Original next to Proposed for manual edits; then Approve, Confidence,
+# Needs Review; status columns last. Must match push_batch, preview, and apply logic.
 SHEET_HEADERS: List[str] = [
     "Batch ID",
     "Full File Path",
-    "Original Filename",
     "Extracted Date",
-    "Version",
-    "Flag",
-    "Cleaned Event Name",
+    "Original Filename",
     "Proposed Filename",
+    "Approve",
     "Confidence",
     "Needs Review",
     "Conflict",
-    "Approve",
     "Manual Notes",
     "Rename Status",
     "Timestamp",
 ]
 
 
-def _column_letter_1based(col: int) -> str:
-    """Spreadsheet column letter from 1-based index (A=1)."""
-    s = ""
-    while col > 0:
-        col, r = divmod(col - 1, 26)
-        s = chr(65 + r) + s
-    return s
+def _col_index_to_a1(col_1based: int) -> str:
+    """1-based column index to A1 letter(s)."""
+    letters = ""
+    n = col_1based
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
 
 
-def _status_and_timestamp_letters() -> Tuple[str, str]:
-    idx_status = SHEET_HEADERS.index("Rename Status") + 1
-    idx_ts = SHEET_HEADERS.index("Timestamp") + 1
-    return _column_letter_1based(idx_status), _column_letter_1based(idx_ts)
+def _strip_conditional_format_rules_for_sheet(sh: Any, sheet_id: int) -> None:
+    """Remove all conditional-format rules on a sheet so re-push does not stack duplicates."""
+    meta = sh.fetch_sheet_metadata(
+        params={"fields": "sheets(properties(sheetId),conditionalFormats)"}
+    )
+    deletes: List[Dict[str, Any]] = []
+    for s in meta.get("sheets", []):
+        if s.get("properties", {}).get("sheetId") != sheet_id:
+            continue
+        cfs = s.get("conditionalFormats") or []
+        for i in range(len(cfs) - 1, -1, -1):
+            deletes.append(
+                {"deleteConditionalFormatRule": {"sheetId": sheet_id, "index": i}}
+            )
+    if deletes:
+        sh.batch_update({"requests": deletes})
+
+
+def _apply_needs_review_row_highlight(sh: Any, ws: Any, num_data_rows: int) -> None:
+    """Yellow row fill when Needs Review is YES (full data row, all columns)."""
+    if num_data_rows <= 0:
+        return
+    sheet_id = ws.id
+    _strip_conditional_format_rules_for_sheet(sh, sheet_id)
+
+    needs_idx = SHEET_HEADERS.index("Needs Review")
+    needs_letter = _col_index_to_a1(needs_idx + 1)
+    ncols = len(SHEET_HEADERS)
+    # Data rows are sheet rows 2 .. num_data_rows+1 → 0-based grid row 1 .. num_data_rows+1
+    end_row_index = num_data_rows + 1
+    formula = f'=${needs_letter}2="YES"'
+
+    rule = {
+        "addConditionalFormatRule": {
+            "rule": {
+                "ranges": [
+                    {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 1,
+                        "endRowIndex": end_row_index,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": ncols,
+                    }
+                ],
+                "booleanRule": {
+                    "condition": {
+                        "type": "CUSTOM_FORMULA",
+                        "values": [{"userEnteredValue": formula}],
+                    },
+                    "format": {
+                        "backgroundColorStyle": {
+                            "rgbColor": {
+                                "red": 1.0,
+                                "green": 0.95,
+                                "blue": 0.65,
+                            }
+                        }
+                    },
+                },
+            },
+            "index": 0,
+        }
+    }
+    sh.batch_update({"requests": [rule]})
 
 
 def credentials_path() -> str:
@@ -78,30 +137,29 @@ def try_open_client():
         return None, f"Could not authorize Google client: {e}"
 
 
-def worksheet_title(start_index: int, batch_size: int) -> str:
-    return f"Start {start_index} Size {batch_size}"
-
-
 def push_batch(
     spreadsheet_name: str,
-    start_index: int,
-    batch_size: int,
+    worksheet_name: str,
     rows: List[Dict[str, Any]],
 ) -> Tuple[bool, str]:
     """
-    Create or clear/update the worksheet for this batch with fresh data.
+    Create or clear/update the worksheet named by the user with fresh data.
     rows: dicts with keys matching SHEET_HEADERS semantics.
     """
     client, err = try_open_client()
     if client is None:
         return False, err or "Unknown client error"
 
+    title = (worksheet_name or "").strip()
+    if not title:
+        return False, "Google Sheet tab name is empty. Enter a tab name before Push."
+    if len(title) > 99:
+        title = title[:99]
+
     try:
         sh = client.open(spreadsheet_name)
     except Exception as e:
         return False, f"Open spreadsheet failed (share with service account?): {e}"
-
-    title = worksheet_title(start_index, batch_size)
     try:
         ws = sh.worksheet(title)
         ws.clear()
@@ -113,32 +171,20 @@ def push_batch(
 
     table: List[List[Any]] = [SHEET_HEADERS]
     for r in rows:
-        table.append(
-            [
-                r.get("Batch ID", ""),
-                r.get("Full File Path", ""),
-                r.get("Original Filename", ""),
-                r.get("Extracted Date", ""),
-                r.get("Version", ""),
-                r.get("Flag", ""),
-                r.get("Cleaned Event Name", ""),
-                r.get("Proposed Filename", ""),
-                r.get("Confidence", ""),
-                r.get("Needs Review", ""),
-                r.get("Conflict", ""),
-                r.get("Approve", ""),
-                r.get("Manual Notes", ""),
-                r.get("Rename Status", ""),
-                r.get("Timestamp", ""),
-            ]
-        )
+        table.append([r.get(h, "") for h in SHEET_HEADERS])
 
-    # RAW = store literals; USER_ENTERED makes Sheets parse "2012-06-17 - Name" as a date
-    # and strip hyphens / change spacing in the Proposed Filename column.
     try:
-        ws.update(table, value_input_option="RAW")
+        ws.update(table, value_input_option="USER_ENTERED")
     except Exception as e:
         return False, f"Writing sheet failed: {e}"
+
+    try:
+        _apply_needs_review_row_highlight(sh, ws, len(rows))
+    except Exception as e:
+        return (
+            True,
+            f"Pushed {len(rows)} rows to worksheet {title!r}, but highlighting failed: {e}",
+        )
 
     return True, f"Pushed {len(rows)} rows to worksheet {title!r}."
 
@@ -191,16 +237,21 @@ def update_row_status_timestamp(
     error_message: str = "",
 ) -> Tuple[bool, str]:
     """
-    Update Rename Status and Timestamp columns (positions follow SHEET_HEADERS).
+    Update Rename Status and Timestamp columns derived from SHEET_HEADERS.
     row_number_1based is the Google Sheet row index (header = row 1).
     """
     client, err = try_open_client()
     if client is None:
         return False, err or "Unknown client error"
 
-    col_status, col_ts = _status_and_timestamp_letters()
-    status_cell = f"{col_status}{row_number_1based}"
-    time_cell = f"{col_ts}{row_number_1based}"
+    try:
+        c_status = _col_index_to_a1(SHEET_HEADERS.index("Rename Status") + 1)
+        c_time = _col_index_to_a1(SHEET_HEADERS.index("Timestamp") + 1)
+    except ValueError:
+        return False, "Sheet headers missing Rename Status or Timestamp."
+
+    status_cell = f"{c_status}{row_number_1based}"
+    time_cell = f"{c_time}{row_number_1based}"
     value = rename_status if not error_message else f"{rename_status}: {error_message}"
 
     try:
@@ -211,7 +262,7 @@ def update_row_status_timestamp(
                 {"range": status_cell, "values": [[value]]},
                 {"range": time_cell, "values": [[timestamp]]},
             ],
-            value_input_option="RAW",
+            value_input_option="USER_ENTERED",
         )
     except Exception as e:
         return False, str(e)

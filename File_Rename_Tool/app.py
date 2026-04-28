@@ -16,13 +16,18 @@ from typing import Any, Dict, List, Tuple
 import pandas as pd
 import streamlit as st
 
-from rename_engine import analyze_row, batch_slice, iter_files
+from rename_engine import (
+    analyze_row,
+    batch_slice,
+    filter_paths_skip_standardized,
+    iter_files,
+)
 from sheets_ops import (
+    SHEET_HEADERS,
     credentials_available,
     push_batch,
     read_worksheet_rows,
     update_row_status_timestamp,
-    worksheet_title,
 )
 
 # ---------------------------------------------------------------------------
@@ -128,16 +133,22 @@ def main() -> None:
     st.sidebar.header("Inputs")
     folder = st.sidebar.text_input("Folder path", value=st.session_state.last_scan_folder)
     include_sub = st.sidebar.checkbox("Include subfolders", value=True)
+    skip_standardized = st.sidebar.checkbox(
+        "Skip already standardized filenames",
+        value=True,
+        help='Hide files whose names already start like "YYYY-MM-DD - …" so batches only list work left to do.',
+    )
     batch_size = st.sidebar.number_input("Batch size", min_value=1, value=250, step=1)
     start_index = st.sidebar.number_input("Start index", min_value=0, value=0, step=1)
     sheet_name = st.sidebar.text_input("Google Sheet name", value="File Rename Tool")
 
-    default_ws = worksheet_title(int(start_index), int(batch_size))
-    apply_ws = st.sidebar.text_input(
-        "Worksheet name (for apply)",
-        value=default_ws,
-        help="Must match the tab created by “Push to Google Sheet”, e.g. Start 0 Size 250",
-    )
+    # One tab name for both Push and Apply; `key` keeps it stable across reruns and batch changes.
+    ws_tab_name = st.sidebar.text_input(
+        "Google Sheet tab name",
+        value="Renames",
+        key="google_sheet_tab_name",
+        help="**Push** writes this tab (creates it if missing). **Apply** reads the same tab. Set whenever you like; it does not auto-change when batch settings change.",
+    ).strip()
 
     st.sidebar.markdown("---")
     scan_btn = st.sidebar.button("Scan Files", type="primary")
@@ -155,6 +166,11 @@ def main() -> None:
     if not has_creds:
         st.sidebar.caption("Push / Apply are disabled until credentials.json is present.")
 
+    st.sidebar.markdown(
+        "**Batching** uses the **filtered scan list** (after optional skips). "
+        "Each batch is a slice by **Start index** and **Batch size** on that list."
+    )
+
     # ---- Scan action ----
     if scan_btn:
         prog = st.empty()
@@ -170,23 +186,56 @@ def main() -> None:
             prog.caption("")
             st.success(f"Scan complete: {len(files):,} files.")
 
-    all_files: List[str] = st.session_state.all_files
-    total = len(all_files)
+    raw_paths: List[str] = st.session_state.all_files
+    work_paths, n_standardized_skipped = filter_paths_skip_standardized(
+        raw_paths, skip_standardized
+    )
+    total_found = len(raw_paths)
+    remaining = len(work_paths)
     start_i = int(start_index)
     size_i = int(batch_size)
-    batch_files = batch_slice(all_files, start_i, size_i)
+    batch_files = batch_slice(work_paths, start_i, size_i)
     end_exclusive = start_i + len(batch_files)
-    suggested_next = end_exclusive if total else 0
+    suggested_next = end_exclusive if remaining else 0
+
+    if total_found > 0:
+        st.warning(
+            "**After applying renames, click Scan again from Start index 0.** "
+            "Renamed files change sort order, so old batch positions no longer line up with the same files."
+        )
+        st.info(
+            "**Safest loop:** Scan (0) → Push → edit sheet → Apply → **Scan again from 0** → repeat. "
+            "With **Skip already standardized** on, files that already match `YYYY-MM-DD - …` stay out of the batch list."
+        )
 
     # ---- Summary metrics ----
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total files found", f"{total:,}")
-    c2.metric("Current batch range", f"{start_i} – {end_exclusive - 1}" if batch_files else "—")
-    c3.metric("Files in this batch", f"{len(batch_files):,}")
-    c4.metric("Suggested next start index", f"{suggested_next:,}")
+    r1c1, r1c2, r1c3 = st.columns(3)
+    r1c1.metric("Total files found (on disk)", f"{total_found:,}")
+    r1c2.metric("Already standardized (skipped)", f"{n_standardized_skipped:,}")
+    r1c3.metric("Remaining (in batch list)", f"{remaining:,}")
 
-    if not batch_files and total > 0:
-        st.info("Start index is past the end of the file list. Lower **Start index** or scan again.")
+    r2c1, r2c2, r2c3 = st.columns(3)
+    r2c1.metric(
+        "Current batch index range",
+        f"{start_i} – {end_exclusive - 1}" if batch_files else "—",
+        help="Indices into the **remaining** list above (not raw disk order).",
+    )
+    r2c2.metric("Files in this batch", f"{len(batch_files):,}")
+    r2c3.metric("Suggested next start index", f"{suggested_next:,}")
+
+    st.caption(
+        "**Suggested next start index** only applies to this scan, before more renames. "
+        "After **Apply approved renames**, set **Start index** back to **0** and **Scan Files** again."
+    )
+
+    if not batch_files and remaining > 0:
+        st.info(
+            "Start index is past the end of the **remaining** list. Lower **Start index** or scan again."
+        )
+    elif not batch_files and total_found > 0 and remaining == 0:
+        st.success(
+            "Every file in this folder already looks standardized for the current filter, or the list is empty."
+        )
 
     # ---- Build preview table ----
     rows_for_df: List[Dict[str, Any]] = []
@@ -196,7 +245,14 @@ def main() -> None:
         if st.session_state.all_files
         else folder.strip()
     )
-    batch_key = (folder_for_key, total, start_i, size_i, tuple(batch_files))
+    batch_key = (
+        folder_for_key,
+        skip_standardized,
+        remaining,
+        start_i,
+        size_i,
+        tuple(batch_files),
+    )
     if st.session_state.get("_batch_key2") != batch_key:
         st.session_state["_batch_key2"] = batch_key
         st.session_state["_stable_batch_id"] = str(uuid.uuid4())
@@ -214,16 +270,13 @@ def main() -> None:
             {
                 "Batch ID": r["Batch ID"],
                 "Full File Path": r["full_path"],
-                "Original Filename": r["original_filename"],
                 "Extracted Date": r["extracted_date"],
-                "Version": r["version"],
-                "Flag": r["flag"],
-                "Cleaned Event Name": r["cleaned_event_name"],
+                "Original Filename": r["original_filename"],
                 "Proposed Filename": r["proposed"],
+                "Approve": r["Approve"],
                 "Confidence": r["confidence"],
                 "Needs Review": r["needs_review"],
                 "Conflict": r["conflict"],
-                "Approve": r["Approve"],
                 "Manual Notes": "",
                 "Rename Status": "",
                 "Timestamp": "",
@@ -232,7 +285,15 @@ def main() -> None:
 
     st.subheader("Local preview (current batch)")
     if rows_for_df:
-        st.dataframe(pd.DataFrame(rows_for_df), use_container_width=True, height=400)
+        df_preview = pd.DataFrame(rows_for_df)
+        for h in SHEET_HEADERS:
+            if h not in df_preview.columns:
+                df_preview[h] = ""
+        st.dataframe(
+            df_preview[SHEET_HEADERS],
+            use_container_width=True,
+            height=400,
+        )
     else:
         st.caption("Run **Scan Files** to populate the preview.")
 
@@ -242,7 +303,7 @@ def main() -> None:
         "start": start_i,
         "size": size_i,
         "sheet_name": sheet_name.strip(),
-        "worksheet": apply_ws.strip(),
+        "worksheet": ws_tab_name,
     }
 
     # ---- Push to Google Sheet ----
@@ -254,7 +315,7 @@ def main() -> None:
             for row in rows_for_df:
                 row["Timestamp"] = ts_push
             with st.spinner("Pushing batch to Google Sheets…"):
-                ok, msg = push_batch(sheet_name.strip(), start_i, size_i, rows_for_df)
+                ok, msg = push_batch(sheet_name.strip(), ws_tab_name, rows_for_df)
             if ok:
                 st.success(msg)
             else:
@@ -263,155 +324,114 @@ def main() -> None:
     # ---- Apply from Google Sheet ----
     if apply_btn:
         log_path = _log_csv_path(start_i, size_i)
-        with st.status("Applying approved renames…", expanded=True) as apply_status:
-            apply_status.write("Loading worksheet from Google Sheets…")
-            data_rows, err = read_worksheet_rows(sheet_name.strip(), apply_ws.strip())
-            if err:
-                apply_status.update(label="Could not read worksheet", state="error", expanded=True)
-                st.error(err)
-            elif not data_rows:
-                apply_status.update(label="No data rows in worksheet", state="error", expanded=True)
-                st.warning("Worksheet is empty or only has a header row.")
-            else:
-                n = len(data_rows)
-                apply_status.write(
-                    f"Processing **{n}** row(s). Backup log: `{os.path.basename(log_path)}`"
-                )
-                progress = st.progress(0.0, text=f"Starting… 0 / {n}")
-                results: List[str] = []
-                counts = {"renamed": 0, "skipped": 0, "conflict": 0, "error": 0}
+        with st.spinner("Reading worksheet and applying approved renames…"):
+            data_rows, err = read_worksheet_rows(sheet_name.strip(), ws_tab_name)
+        if err:
+            st.error(err)
+        elif not data_rows:
+            st.warning("Worksheet is empty or only has a header row.")
+        else:
+            progress = st.progress(0.0)
+            n = len(data_rows)
+            results: List[str] = []
 
-                for idx, (sheet_row, rd) in enumerate(data_rows):
-                    done = idx + 1
-                    progress.progress(
-                        min(1.0, done / max(1, n)),
-                        text=f"Row {done} / {n} (sheet row {sheet_row})…",
+            for idx, (sheet_row, rd) in enumerate(data_rows):
+                progress.progress(min(1.0, (idx + 1) / max(1, n)))
+                row_ts = datetime.now().isoformat(timespec="seconds")
+
+                approve_val = rd.get("Approve", "")
+                orig_path = rd.get("Full File Path", "").strip()
+                proposed = rd.get("Proposed Filename", "").strip()
+
+                if not _normalize_yes(approve_val):
+                    _append_csv_log(log_path, orig_path, "", "Skipped", "")
+                    ok_upd, err_upd = update_row_status_timestamp(
+                        sheet_name.strip(),
+                        ws_tab_name,
+                        sheet_row,
+                        "Skipped",
+                        row_ts,
+                        "",
                     )
-                    row_ts = datetime.now().isoformat(timespec="seconds")
+                    if not ok_upd:
+                        results.append(f"Row {sheet_row}: sheet update failed: {err_upd}")
+                    continue
 
-                    approve_val = rd.get("Approve", "")
-                    orig_path = rd.get("Full File Path", "").strip()
-                    proposed = rd.get("Proposed Filename", "").strip()
-
-                    if not _normalize_yes(approve_val):
-                        counts["skipped"] += 1
-                        _append_csv_log(log_path, orig_path, "", "Skipped", "")
-                        ok_upd, err_upd = update_row_status_timestamp(
-                            sheet_name.strip(),
-                            apply_ws.strip(),
-                            sheet_row,
-                            "Skipped",
-                            row_ts,
-                            "",
-                        )
-                        if not ok_upd:
-                            results.append(f"Row {sheet_row}: sheet update failed: {err_upd}")
-                        continue
-
-                    safe, why = _is_safe_proposed_filename(proposed)
-                    if not safe:
-                        counts["error"] += 1
-                        _append_csv_log(log_path, orig_path, "", "Error", why)
-                        update_row_status_timestamp(
-                            sheet_name.strip(), apply_ws.strip(), sheet_row, "Error", row_ts, why
-                        )
-                        results.append(f"Row {sheet_row}: {why}")
-                        continue
-
-                    if not orig_path or not os.path.isfile(orig_path):
-                        counts["error"] += 1
-                        em = "Original file no longer exists"
-                        _append_csv_log(log_path, orig_path, "", "Error", em)
-                        update_row_status_timestamp(
-                            sheet_name.strip(), apply_ws.strip(), sheet_row, "Error", row_ts, em
-                        )
-                        continue
-
-                    target_dir = os.path.dirname(orig_path)
-                    target_path = os.path.join(target_dir, proposed)
-
-                    if os.path.basename(orig_path) == proposed:
-                        counts["skipped"] += 1
-                        _append_csv_log(log_path, orig_path, target_path, "Skipped", "Already named")
-                        update_row_status_timestamp(
-                            sheet_name.strip(),
-                            apply_ws.strip(),
-                            sheet_row,
-                            "Skipped",
-                            row_ts,
-                            "Already named",
-                        )
-                        continue
-
-                    if os.path.exists(target_path):
-                        try:
-                            same = os.path.samefile(target_path, orig_path)
-                        except OSError:
-                            same = False
-                        if not same:
-                            counts["conflict"] += 1
-                            em = "Target filename already exists"
-                            _append_csv_log(
-                                log_path, orig_path, target_path, "Conflict", em
-                            )
-                            update_row_status_timestamp(
-                                sheet_name.strip(),
-                                apply_ws.strip(),
-                                sheet_row,
-                                "Conflict",
-                                row_ts,
-                                em,
-                            )
-                            continue
-
-                    try:
-                        os.rename(orig_path, target_path)
-                    except OSError as e:
-                        counts["error"] += 1
-                        em = str(e)
-                        _append_csv_log(log_path, orig_path, target_path, "Error", em)
-                        update_row_status_timestamp(
-                            sheet_name.strip(), apply_ws.strip(), sheet_row, "Error", row_ts, em
-                        )
-                        results.append(f"Row {sheet_row}: {em}")
-                        continue
-
-                    counts["renamed"] += 1
-                    _append_csv_log(log_path, orig_path, target_path, "Renamed", "")
+                safe, why = _is_safe_proposed_filename(proposed)
+                if not safe:
+                    _append_csv_log(log_path, orig_path, "", "Error", why)
                     update_row_status_timestamp(
-                        sheet_name.strip(), apply_ws.strip(), sheet_row, "Renamed", row_ts, ""
+                        sheet_name.strip(), ws_tab_name, sheet_row, "Error", row_ts, why
                     )
+                    results.append(f"Row {sheet_row}: {why}")
+                    continue
 
-                progress.progress(1.0, text=f"Finished {n} / {n}")
-                summary_md = (
-                    f"**Renamed:** {counts['renamed']} · **Skipped:** {counts['skipped']} · "
-                    f"**Conflict:** {counts['conflict']} · **Errors:** {counts['error']}"
-                )
-                summary_plain = (
-                    f"Renamed: {counts['renamed']}, Skipped: {counts['skipped']}, "
-                    f"Conflict: {counts['conflict']}, Errors: {counts['error']}"
-                )
-                apply_status.write(summary_md)
-                apply_status.update(
-                    label="Apply finished",
-                    state="complete",
-                    expanded=bool(results),
-                )
-                progress.empty()
+                if not orig_path or not os.path.isfile(orig_path):
+                    em = "Original file no longer exists"
+                    _append_csv_log(log_path, orig_path, "", "Error", em)
+                    update_row_status_timestamp(
+                        sheet_name.strip(), ws_tab_name, sheet_row, "Error", row_ts, em
+                    )
+                    continue
 
-                st.success(
-                    f"Apply finished. {summary_plain} — backup log: `{os.path.basename(log_path)}`"
-                )
+                target_dir = os.path.dirname(orig_path)
+                target_path = os.path.join(target_dir, proposed)
+
+                if os.path.basename(orig_path) == proposed:
+                    _append_csv_log(log_path, orig_path, target_path, "Skipped", "Already named")
+                    update_row_status_timestamp(
+                        sheet_name.strip(),
+                        ws_tab_name,
+                        sheet_row,
+                        "Skipped",
+                        row_ts,
+                        "Already named",
+                    )
+                    continue
+
+                if os.path.exists(target_path):
+                    try:
+                        same = os.path.samefile(target_path, orig_path)
+                    except OSError:
+                        same = False
+                    if not same:
+                        em = "Target filename already exists"
+                        _append_csv_log(
+                            log_path, orig_path, target_path, "Conflict", em
+                        )
+                        update_row_status_timestamp(
+                            sheet_name.strip(),
+                            ws_tab_name,
+                            sheet_row,
+                            "Conflict",
+                            row_ts,
+                            em,
+                        )
+                        continue
+
                 try:
-                    st.toast(
-                        f"Done: {counts['renamed']} renamed, {counts['skipped']} skipped.",
-                        icon="✅",
+                    os.rename(orig_path, target_path)
+                except OSError as e:
+                    em = str(e)
+                    _append_csv_log(log_path, orig_path, target_path, "Error", em)
+                    update_row_status_timestamp(
+                        sheet_name.strip(), ws_tab_name, sheet_row, "Error", row_ts, em
                     )
-                except Exception:
-                    pass
-                if results:
-                    with st.expander("Errors / notes"):
-                        st.write("\n".join(results))
+                    results.append(f"Row {sheet_row}: {em}")
+                    continue
+
+                _append_csv_log(log_path, orig_path, target_path, "Renamed", "")
+                update_row_status_timestamp(
+                    sheet_name.strip(), ws_tab_name, sheet_row, "Renamed", row_ts, ""
+                )
+
+            progress.empty()
+            st.success(
+                f"Apply pass finished. Local backup log: `{os.path.basename(log_path)}`"
+            )
+            if results:
+                with st.expander("Errors / notes"):
+                    st.write("\n".join(results))
 
     # ---- Footer help ----
     with st.expander("Local setup (quick reference)"):

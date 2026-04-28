@@ -36,8 +36,8 @@ The Streamlit app will open that spreadsheet by **title** (exact match). Share t
 
 1. Enter the **folder path**, choose whether to **include subfolders**, set **batch size** (default 250) and **start index** (default 0).
 2. Click **Scan Files**. Large trees update a live “Scanned N files…” caption while walking the disk.
-3. Review the **local preview** table (dates, **Version**, **Flag** (`No$$`), **Cleaned Event Name**, confidence, proposed names, conflicts).
-4. Click **Push to Google Sheet** to create/refresh a tab named like `Start 0 Size 250`. Edit **Proposed Filename** and set **Approve** to YES only where you are sure. (Re-push to pick up new columns if an older tab was created with fewer columns.)
+3. Review the **local preview** table (dates, confidence, proposed names, conflicts).
+4. Enter your **Google Sheet tab name** in the sidebar, then click **Push to Google Sheet** to create/refresh that tab. Edit **Proposed Filename** and set **Approve** to YES only where you are sure. **Apply** uses the same tab name.
 5. Click **Apply Approved Renames** after selecting the correct **Worksheet name (for apply)**. Each row is evaluated; statuses and timestamps are written back to the sheet when possible.
 
 Local backup CSVs are appended automatically:
