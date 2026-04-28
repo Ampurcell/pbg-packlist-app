@@ -343,7 +343,9 @@ def analyze_row(full_path: str) -> dict:
     fn = os.path.basename(full_path)
     info = build_proposed_filename(fn)
     conflict = proposed_path_conflicts(full_path, info["proposed"])
-    approve_default = "YES" if info["confidence"] == "HIGH" else "NO"
+    # Only pre-fill YES for HIGH; leave empty otherwise so the sheet shows what you
+    # still need to decide (empty ≠ approved skip).
+    approve_default = "YES" if info["confidence"] == "HIGH" else ""
     needs_review_cell = "YES" if info["needs_review"] else "NO"
     conflict_cell = "YES" if conflict else "NO"
     batch_id = ""  # filled by caller with batch id string

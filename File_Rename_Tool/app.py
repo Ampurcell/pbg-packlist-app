@@ -284,6 +284,11 @@ def main() -> None:
         )
 
     st.subheader("Local preview (current batch)")
+    st.caption(
+        "**Approve** is only prefilled **YES** for HIGH confidence; all other rows stay **blank** "
+        "until you type YES (or leave blank to skip). In Google Sheets, use **Data → Create a filter**, "
+        "then filter **Approve** to **blanks** to see rows you have not decided yet."
+    )
     if rows_for_df:
         df_preview = pd.DataFrame(rows_for_df)
         for h in SHEET_HEADERS:
