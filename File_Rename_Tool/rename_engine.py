@@ -13,8 +13,14 @@ from typing import Iterator, List, Optional, Tuple
 
 # Matches M.D.YY, MM.DD.YYYY, etc. (month.day.year) — month/day 1–2 digits, year 2 or 4 digits.
 # Negative lookbehind/ahead: avoid gluing into larger digit runs.
-_DATE_PATTERN = re.compile(
+_DATE_DOTTED_PATTERN = re.compile(
     r"(?<![0-9])(?P<m>\d{1,2})\.(?P<d>\d{1,2})\.(?P<y>\d{2}|\d{4})(?![0-9])"
+)
+# Matches compact MMDDYY or MMDDYYYY (e.g. 100119, 10012019).
+_DATE_COMPACT_PATTERN = re.compile(r"(?<![0-9])(?P<m>\d{2})(?P<d>\d{2})(?P<y>\d{2}|\d{4})(?![0-9])")
+# Matches M-D-YY, MM-DD-YYYY, M/D/YY, etc.
+_DATE_SLASH_HYPHEN_PATTERN = re.compile(
+    r"(?<![0-9])(?P<m>\d{1,2})[/-](?P<d>\d{1,2})[/-](?P<y>\d{2}|\d{4})(?![0-9])"
 )
 
 # Looks like another dotted number group that could confuse humans (not necessarily a valid date).
@@ -102,29 +108,41 @@ class DateMatch:
     raw: str  # original substring e.g. 01.02.20
 
 
+def _validate_date_match(m: re.Match[str]) -> Optional[DateMatch]:
+    """Validate regex date groups and return normalized DateMatch, else None."""
+    month = int(m.group("m"))
+    day = int(m.group("d"))
+    if not _valid_month_day(month, day):
+        return None
+    y = _parse_year(m.group("y"))
+    if y is None:
+        return None
+    try:
+        datetime(y, month, day)
+    except ValueError:
+        return None
+    raw = m.group(0)
+    iso = f"{y:04d}-{month:02d}-{day:02d}"
+    return DateMatch(start=m.start(), end=m.end(), iso=iso, raw=raw)
+
+
 def find_valid_dates_in_basename(basename_no_ext: str) -> List[DateMatch]:
-    """Find all non-overlapping valid M.D.Y date tokens in order."""
+    """Find all non-overlapping valid date tokens in order."""
+    candidates: List[DateMatch] = []
+    for pattern in (_DATE_DOTTED_PATTERN, _DATE_SLASH_HYPHEN_PATTERN, _DATE_COMPACT_PATTERN):
+        for m in pattern.finditer(basename_no_ext):
+            dm = _validate_date_match(m)
+            if dm is not None:
+                candidates.append(dm)
+
+    candidates.sort(key=lambda d: (d.start, d.end))
     matches: List[DateMatch] = []
     last_end = -1
-    for m in _DATE_PATTERN.finditer(basename_no_ext):
-        if m.start() < last_end:
+    for dm in candidates:
+        if dm.start < last_end:
             continue
-        month = int(m.group("m"))
-        day = int(m.group("d"))
-        if not _valid_month_day(month, day):
-            continue
-        y = _parse_year(m.group("y"))
-        if y is None:
-            continue
-        try:
-            # Light sanity: datetime accepts impossible Feb 31 in older Python? Actually raises.
-            datetime(y, month, day)
-        except ValueError:
-            continue
-        raw = m.group(0)
-        iso = f"{y:04d}-{month:02d}-{day:02d}"
-        matches.append(DateMatch(start=m.start(), end=m.end(), iso=iso, raw=raw))
-        last_end = m.end()
+        matches.append(dm)
+        last_end = dm.end
     return matches
 
 
@@ -145,20 +163,12 @@ def _has_extra_confusing_numbers(basename_no_ext: str, used_spans: List[Tuple[in
 
 
 def _failed_date_like_tokens(basename_no_ext: str) -> int:
-    """Count regex matches that look like M.D.Y but fail month/day/year rules (partial/ambiguous)."""
+    """Count date-like tokens that fail month/day/year rules (partial/ambiguous)."""
     n = 0
-    for m in _DATE_PATTERN.finditer(basename_no_ext):
-        month = int(m.group("m"))
-        day = int(m.group("d"))
-        y = _parse_year(m.group("y"))
-        ok = _valid_month_day(month, day) and y is not None
-        if ok:
-            try:
-                datetime(y, month, day)
-            except ValueError:
-                ok = False
-        if not ok:
-            n += 1
+    for pattern in (_DATE_DOTTED_PATTERN, _DATE_SLASH_HYPHEN_PATTERN, _DATE_COMPACT_PATTERN):
+        for m in pattern.finditer(basename_no_ext):
+            if _validate_date_match(m) is None:
+                n += 1
     return n
 
 
