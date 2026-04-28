@@ -200,6 +200,88 @@ def clean_stem_after_date_removal(stem: str, date_to_remove: Optional[DateMatch]
     return s
 
 
+def _normalize_stem_like_clean(fragment: str) -> str:
+    """Same space/dot rules as clean_stem_after_date_removal (without date removal)."""
+    s = fragment.replace(".", " ").replace("_", " ")
+    s = re.sub(r"\s+", " ", s).strip(" \t-")
+    return s
+
+
+def _split_post_date_version(post: str) -> Optional[Tuple[str, str]]:
+    """
+    If ``post`` is the basename substring immediately after the date token, detect
+    ``<single-letter version><name>`` and return (name_after, letter). Else None.
+    """
+    post = post.lstrip(" \t._-")
+    if len(post) < 2:
+        return None
+
+    m = re.match(r"^([A-Z])\s+(.+)$", post)
+    if m:
+        return m.group(2), m.group(1)
+
+    m = re.match(r"^([A-Z])[-_](.+)$", post)
+    if m:
+        return m.group(2), m.group(1)
+
+    m = re.match(r"^([A-Z])([A-Z][a-z].*)$", post)
+    if m:
+        return m.group(2), m.group(1)
+
+    return None
+
+
+def rebuild_stem_when_version_follows_date(
+    base: str, primary: DateMatch, cleaned_fallback: str
+) -> str:
+    """
+    Original layout often ``… <date> <A|B|…> <title>`` (or glued ``…<date>A<title>``).
+    Rebuild the descriptive stem as ``<prefix + title normalized> - <letter>`` so
+    the version is not read as part of the title. Falls back to *cleaned_fallback*
+    when the after-date segment does not match a revision pattern.
+    """
+    split = _split_post_date_version(base[primary.end :])
+    if split is None:
+        return cleaned_fallback
+
+    name_after, letter = split
+    pre = base[: primary.start].rstrip(" \t._-")
+    inner = f"{pre} {name_after}".strip() if pre else name_after
+    inner_norm = _normalize_stem_like_clean(inner)
+    if not inner_norm:
+        return f"{letter}" if letter else cleaned_fallback
+    return f"{inner_norm} - {letter}"
+
+
+def separate_name_from_trailing_version(stem: str) -> str:
+    """
+    Put a visible separator before a trailing single-letter version marker so it
+    does not read as part of the word (e.g. ContractA -> Contract - A).
+
+    Handles:
+    - Glued: lowercase/digit + one trailing A-Z (ReportMar2024A -> ...A split only at end).
+    - Single space before one trailing A-Z (Report A -> Report - A).
+
+    Skips when the marker is already next to - or ., or when the name already
+    ends with ' - <letter>'.
+    """
+    s = stem.strip()
+    if len(s) < 2:
+        return stem
+
+    if re.search(r" - [A-Z]$", s):
+        return stem
+
+    # Glued revision letter after lowercase or digit (e.g. ContractA, file2B)
+    s = re.sub(r"([a-z0-9])([A-Z])$", r"\1 - \2", s)
+
+    # One or more spaces before a single trailing letter (e.g. Report A); do not
+    # touch if the character before the spaces is already . or -
+    s = re.sub(r"([^\s.\-])(\s+)([A-Z])$", r"\1 - \3", s)
+
+    return s
+
+
 def build_proposed_filename(original_filename: str) -> dict:
     """
     Analyze a single filename (not full path).
@@ -219,6 +301,9 @@ def build_proposed_filename(original_filename: str) -> dict:
     confidence, primary = classify_confidence(base, dates)
 
     cleaned = clean_stem_after_date_removal(base, primary)
+    if primary:
+        cleaned = rebuild_stem_when_version_follows_date(base, primary, cleaned)
+    cleaned = separate_name_from_trailing_version(cleaned)
     # Preserve extension as-is (including case)
     if primary:
         proposed = f"{primary.iso} - {cleaned}{ext}" if cleaned else f"{primary.iso}{ext}"
