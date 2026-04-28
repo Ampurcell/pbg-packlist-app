@@ -270,7 +270,7 @@ def separate_name_from_trailing_version(stem: str) -> str:
         return stem
 
     if re.search(r" - [A-Z]$", s):
-        return stem
+        return s
 
     # Glued revision letter after lowercase or digit (e.g. ContractA, file2B)
     s = re.sub(r"([a-z0-9])([A-Z])$", r"\1 - \2", s)
