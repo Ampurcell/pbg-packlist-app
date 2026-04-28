@@ -102,6 +102,27 @@ class DateMatch:
     raw: str  # original substring e.g. 01.02.20
 
 
+@dataclass
+class MonthYearMatch:
+    """Month + year only (no day), e.g. 03.2013 or 9.20 → prefix YYYY-MM."""
+
+    start: int
+    end: int
+    raw: str
+    yyyymm: str  # YYYY-MM
+
+
+# Month.year or month.yy — not followed by another dot+digits (avoids stealing from M.D.Y).
+# Must follow start or a separator so we don't match inside "v1.2020".
+_MONTH_YEAR_PATTERN = re.compile(
+    r"(?i)(?:^|[\s._-])(?P<mo>\d{1,2})\.(?P<yr>\d{2}|\d{4})(?![0-9.])"
+)
+# Glued after letters: "Report03.2013" — only 01–12 with leading zero (avoids "v1.2020").
+_MONTH_YEAR_GLUED = re.compile(
+    r"(?<=[A-Za-z])(?P<mo>0[1-9]|1[0-2])\.(?P<yr>\d{4})(?![0-9.])", re.IGNORECASE
+)
+
+
 def remove_junk_from_basename(basename_no_ext: str) -> str:
     """
     Remove sync/recovery noise before date/version/flag parsing.
@@ -181,6 +202,64 @@ def find_valid_dates_in_basename(basename_no_ext: str) -> List[DateMatch]:
     return matches
 
 
+def _my_spans_overlap(a: Tuple[int, int], b: Tuple[int, int]) -> bool:
+    return not (a[1] <= b[0] or b[1] <= a[0])
+
+
+def find_month_year_matches(basename_no_ext: str) -> List[MonthYearMatch]:
+    """
+    Month + year tokens (no day), same month/year rules as full dates.
+    Separator-bound first, then letter-glued (Report03.2013) if it does not overlap.
+    """
+    matches: List[MonthYearMatch] = []
+    last_end = -1
+    for m in _MONTH_YEAR_PATTERN.finditer(basename_no_ext):
+        mo_s = m.group("mo")
+        yr_s = m.group("yr")
+        month = int(mo_s)
+        if not (1 <= month <= 12):
+            continue
+        y = _parse_year(yr_s)
+        if y is None:
+            continue
+        start, end = m.start(), m.end()
+        if start < last_end:
+            continue
+        raw = basename_no_ext[start:end]
+        yyyymm = f"{y:04d}-{month:02d}"
+        matches.append(MonthYearMatch(start=start, end=end, raw=raw, yyyymm=yyyymm))
+        last_end = end
+
+    for m in _MONTH_YEAR_GLUED.finditer(basename_no_ext):
+        mo_s = m.group("mo")
+        yr_s = m.group("yr")
+        month = int(mo_s)
+        y = _parse_year(yr_s)
+        if y is None:
+            continue
+        start, end = m.start(), m.end()
+        span = (start, end)
+        if any(_my_spans_overlap(span, (x.start, x.end)) for x in matches):
+            continue
+        raw = basename_no_ext[start:end]
+        matches.append(
+            MonthYearMatch(start=start, end=end, raw=raw, yyyymm=f"{y:04d}-{month:02d}")
+        )
+
+    matches.sort(key=lambda x: x.start)
+    return matches
+
+
+def classify_month_year_confidence(
+    matches: List[MonthYearMatch],
+) -> Tuple[str, Optional[MonthYearMatch]]:
+    if not matches:
+        return "NO DATE", None
+    if len(matches) > 1:
+        return "MEDIUM", matches[0]
+    return "HIGH", matches[0]
+
+
 def _has_extra_confusing_numbers(basename_no_ext: str, used_spans: List[Tuple[int, int]]) -> bool:
     """
     True if there are dotted digit patterns outside the detected date span(s)
@@ -255,20 +334,20 @@ def _remove_primary_date_from_stem(stem: str, date_to_remove: Optional[DateMatch
 
 
 def _assemble_proposed_name(
-    iso_date: Optional[str],
+    calendar_prefix: Optional[str],
     event_name: str,
     version: Optional[str],
     flag_tokens: List[str],
     ext: str,
 ) -> str:
     """
-    YYYY-MM-DD - Event Name - Version - Flag(s).ext
+    Leading calendar token (YYYY-MM-DD or YYYY-MM) - Event - Version - Flag(s).ext
     flag_tokens: e.g. ["No$$"] and/or ["NO #"] in stable order (No$$ then NO #).
-    Omit date / version / flag segments when absent; avoid double dashes.
+    Omit segments when absent; avoid double dashes.
     """
     parts: List[str] = []
-    if iso_date:
-        parts.append(iso_date)
+    if calendar_prefix:
+        parts.append(calendar_prefix)
     if event_name:
         parts.append(event_name)
     if version:
@@ -318,24 +397,42 @@ def build_proposed_filename(original_filename: str) -> dict:
     # 3) Version letter at end (not inside words — requires leading separator)
     stem, version_letter = extract_trailing_version_letter(stem)
 
-    # 4) Dates on remaining stem (confidence uses same stem)
+    # 4) Full M.D.Y on stem first; if none, month+year only (prefix YYYY-MM)
     dates = find_valid_dates_in_basename(stem)
-    confidence, primary = classify_confidence(stem, dates)
+    confidence_full, primary = classify_confidence(stem, dates)
 
-    # 5) Event = stem with primary date removed, then humanize separators
-    after_date = _remove_primary_date_from_stem(stem, primary)
-    # Dots/underscores in leftover event text → spaces, then collapse all separators
-    after_date = after_date.replace(".", " ").replace("_", " ")
-    cleaned_event = _collapse_separators_and_trim(after_date)
+    my_matches: List[MonthYearMatch] = []
+    my_primary: Optional[MonthYearMatch] = None
+    if primary is None:
+        my_matches = find_month_year_matches(stem)
+        confidence, my_primary = classify_month_year_confidence(my_matches)
+    else:
+        confidence = confidence_full
 
-    iso = primary.iso if primary else ""
+    # 5) Event = stem with calendar token removed, then humanize separators
+    if primary:
+        after_calendar = _remove_primary_date_from_stem(stem, primary)
+        extracted = primary.iso
+    elif my_primary:
+        after_calendar = stem
+        for m in sorted(my_matches, key=lambda z: z.start, reverse=True):
+            after_calendar = after_calendar[: m.start] + " " + after_calendar[m.end :]
+        extracted = my_matches[0].yyyymm
+    else:
+        after_calendar = stem
+        extracted = ""
+
+    after_calendar = after_calendar.replace(".", " ").replace("_", " ")
+    cleaned_event = _collapse_separators_and_trim(after_calendar)
 
     flag_tokens: List[str] = []
     if has_no_money:
         flag_tokens.append("No$$")
     if has_no_pound:
         flag_tokens.append("NO #")
-    proposed = _assemble_proposed_name(iso or None, cleaned_event, version_letter, flag_tokens, ext)
+    proposed = _assemble_proposed_name(
+        extracted or None, cleaned_event, version_letter, flag_tokens, ext
+    )
 
     # If everything stripped away, fall back to the original filename
     if not proposed.strip() or proposed == ext:
@@ -346,7 +443,7 @@ def build_proposed_filename(original_filename: str) -> dict:
     flag_display = "; ".join(flag_tokens)
 
     return {
-        "extracted_date": iso,
+        "extracted_date": extracted,
         "proposed": proposed,
         "confidence": confidence,
         "needs_review": needs_review,
